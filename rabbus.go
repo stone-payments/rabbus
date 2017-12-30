@@ -135,6 +135,7 @@ type RabbusInterpreter struct {
 	emitOk     chan struct{}
 	config     Config
 	exDeclared map[string]struct{}
+	closing    bool
 }
 
 // NewRabbus returns a new RabbusInterpreter configured with the
@@ -241,17 +242,45 @@ func (ri *RabbusInterpreter) Listen(c ListenConfig) (chan ConsumerMessage, error
 	}
 
 	messages := make(chan ConsumerMessage, 256)
-	go func(msgs <-chan amqp.Delivery, messages chan ConsumerMessage) {
+	var consume func(msgs <-chan amqp.Delivery, messages chan ConsumerMessage)
+	consume = func(msgs <-chan amqp.Delivery, messages chan ConsumerMessage) {
 		for m := range msgs {
 			messages <- newConsumerMessage(m)
 		}
-	}(msgs, messages)
+		if !ri.closing {
+			err := retry.Do(func() error {
+				ch, err := ri.conn.Channel()
+				if err != nil {
+					return err
+				}
+
+				if err := ch.Qos(ri.config.Qos.PrefetchCount, ri.config.Qos.PrefetchSize, ri.config.Qos.Global); err != nil {
+					return err
+				}
+				ri.ch = ch
+				msgs, err = ri.ch.Consume(q.Name, "", false, false, false, false, nil)
+				if err != nil {
+					return err
+				}
+				return nil
+			}, ri.config.Retry.Attempts, ri.config.Retry.Sleep)
+			if err != nil {
+				close(messages)
+			} else {
+				go consume(msgs, messages)
+			}
+		} else {
+			close(messages)
+		}
+	}
+	go consume(msgs, messages)
 
 	return messages, nil
 }
 
 // Close attempt to close channel and connection.
 func (ri *RabbusInterpreter) Close() (err error) {
+	ri.closing = true
 	if err = ri.ch.Close(); err != nil {
 		return
 	}
@@ -349,6 +378,7 @@ func newRabbusInterpreter(conn *amqp.Connection, ch *amqp.Channel, c Config) *Ra
 		emitErr:    make(chan error),
 		emitOk:     make(chan struct{}),
 		exDeclared: make(map[string]struct{}),
+		closing:    false,
 	}
 }
 
