@@ -35,7 +35,7 @@ type Rabbus interface {
 	// amqp consumer.
 	Listen(ListenConfig) (chan ConsumerMessage, error)
 	// Close attempt to close channel and connection.
-	Close()
+	Close() error
 }
 
 // Config carries the variables to tune a newly started rabbus.
